@@ -2,7 +2,10 @@ package datamodel_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +36,9 @@ func TestOrderedMap(t *testing.T) {
 		var i int
 		for pair := m.First(); pair != nil; pair = pair.Next() {
 			assert.Equal(t, fmt.Sprintf("foobar_%d", i), pair.Key())
+			assert.Equal(t, fmt.Sprintf("foobar_%d", i), *pair.KeyPtr())
 			assert.Equal(t, i, pair.Value())
+			assert.Equal(t, i, *pair.ValuePtr())
 			i++
 			require.LessOrEqual(t, i, mapSize)
 		}
@@ -98,7 +103,9 @@ func TestOrderedMap(t *testing.T) {
 			c := m.Iterate(ctx)
 			for pair := range c {
 				assert.Equal(t, fmt.Sprintf("key%d", i), pair.Key())
+				assert.Equal(t, fmt.Sprintf("key%d", i), *pair.KeyPtr())
 				assert.Equal(t, i+1000, pair.Value())
+				assert.Equal(t, i+1000, *pair.ValuePtr())
 				i++
 				require.LessOrEqual(t, i, mapSize)
 			}
@@ -118,7 +125,9 @@ func TestOrderedMap(t *testing.T) {
 			c := m.Iterate(ctx)
 			for pair := range c {
 				assert.Equal(t, fmt.Sprintf("key%d", i), pair.Key())
+				assert.Equal(t, fmt.Sprintf("key%d", i), *pair.KeyPtr())
 				assert.Equal(t, i+1000, pair.Value())
+				assert.Equal(t, i+1000, *pair.ValuePtr())
 				i++
 				if i >= mapSize/2 {
 					break
@@ -128,6 +137,7 @@ func TestOrderedMap(t *testing.T) {
 			cancel()
 			time.Sleep(10 * time.Millisecond)
 			requireClosed(t, c)
+			assert.Equal(t, mapSize/2, i)
 		})
 	})
 }
@@ -149,29 +159,23 @@ func TestMap(t *testing.T) {
 		})
 	})
 
-	t.Run("IterateMap()", func(t *testing.T) {
+	t.Run("ForMap()", func(t *testing.T) {
 		const mapSize = 10
 
 		t.Run("Nil pointer", func(t *testing.T) {
 			var m datamodel.Map[string, int]
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			c := datamodel.IterateMap(ctx, m)
-			for range c {
-				t.Fatal("Expected no data")
-			}
-			requireClosed(t, c)
+			err := datamodel.ForMap(m, func(_ datamodel.Pair[string, int]) error {
+				return errors.New("Expected no data")
+			})
+			require.NoError(t, err)
 		})
 
 		t.Run("Empty", func(t *testing.T) {
 			m := datamodel.NewOrderedMap[string, int]()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			c := datamodel.IterateMap(ctx, m)
-			for range c {
-				t.Fatal("Expected no data")
-			}
-			requireClosed(t, c)
+			err := datamodel.ForMap(m, func(_ datamodel.Pair[string, int]) error {
+				return errors.New("Expected no data")
+			})
+			require.NoError(t, err)
 		})
 
 		t.Run("Full iteration", func(t *testing.T) {
@@ -181,17 +185,17 @@ func TestMap(t *testing.T) {
 			}
 
 			var i int
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			c := datamodel.IterateMap(ctx, m)
-			for pair := range c {
+			err := datamodel.ForMap(m, func(pair datamodel.Pair[string, int]) error {
 				assert.Equal(t, fmt.Sprintf("key%d", i), pair.Key())
+				assert.Equal(t, fmt.Sprintf("key%d", i), *pair.KeyPtr())
 				assert.Equal(t, i+1000, pair.Value())
+				assert.Equal(t, i+1000, *pair.ValuePtr())
 				i++
 				require.LessOrEqual(t, i, mapSize)
-			}
+				return nil
+			})
+			require.NoError(t, err)
 			assert.Equal(t, mapSize, i)
-			requireClosed(t, c)
 		})
 
 		t.Run("Partial iteration", func(t *testing.T) {
@@ -201,21 +205,116 @@ func TestMap(t *testing.T) {
 			}
 
 			var i int
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			c := datamodel.IterateMap(ctx, m)
-			for pair := range c {
+			err := datamodel.ForMap(m, func(pair datamodel.Pair[string, int]) error {
 				assert.Equal(t, fmt.Sprintf("key%d", i), pair.Key())
+				assert.Equal(t, fmt.Sprintf("key%d", i), *pair.KeyPtr())
 				assert.Equal(t, i+1000, pair.Value())
+				assert.Equal(t, i+1000, *pair.ValuePtr())
 				i++
 				if i >= mapSize/2 {
-					break
+					return io.EOF
 				}
+				return nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, mapSize/2, i)
+		})
+	})
+
+	t.Run("TranslateMapParallel()", func(t *testing.T) {
+		const mapSize = 1000
+		m := datamodel.NewOrderedMap[string, int]()
+		for i := 0; i < mapSize; i++ {
+			m.Set(fmt.Sprintf("key%d", i), i+1000)
+		}
+
+		var translateCounter int64
+		translateFunc := func(pair datamodel.Pair[string, int]) (string, error) {
+			result := fmt.Sprintf("foobar %d", pair.Value())
+			atomic.AddInt64(&translateCounter, 1)
+			return result, nil
+		}
+		var resultCounter int
+		resultFunc := func(value string) error {
+			assert.Equal(t, fmt.Sprintf("foobar %d", resultCounter+1000), value)
+			resultCounter++
+			return nil
+		}
+		err := datamodel.TranslateMapParallel[string, int, string](m, translateFunc, resultFunc)
+		require.NoError(t, err)
+		assert.Equal(t, int64(mapSize), translateCounter)
+		assert.Equal(t, mapSize, resultCounter)
+
+		t.Run("Error in translate", func(t *testing.T) {
+			m := datamodel.NewOrderedMap[string, int]()
+			for i := 0; i < mapSize; i++ {
+				m.Set(fmt.Sprintf("key%d", i), i+1000)
 			}
 
-			cancel()
-			time.Sleep(10 * time.Millisecond)
-			requireClosed(t, c)
+			var translateCounter int64
+			translateFunc := func(pair datamodel.Pair[string, int]) (string, error) {
+				atomic.AddInt64(&translateCounter, 1)
+				return "", errors.New("Foobar")
+			}
+			resultFunc := func(value string) error {
+				t.Fatal("Expected no call to resultFunc()")
+				return nil
+			}
+			err := datamodel.TranslateMapParallel[string, int, string](m, translateFunc, resultFunc)
+			require.ErrorContains(t, err, "Foobar")
+			assert.Less(t, translateCounter, int64(mapSize))
+		})
+
+		t.Run("Error in result", func(t *testing.T) {
+			m := datamodel.NewOrderedMap[string, int]()
+			for i := 0; i < mapSize; i++ {
+				m.Set(fmt.Sprintf("key%d", i), i+1000)
+			}
+
+			var resultCounter int
+			resultFunc := func(value string) error {
+				resultCounter++
+				return errors.New("Foobar")
+			}
+			err := datamodel.TranslateMapParallel[string, int, string](m, translateFunc, resultFunc)
+			require.ErrorContains(t, err, "Foobar")
+			assert.Less(t, resultCounter, mapSize)
+		})
+
+		t.Run("EOF in translate", func(t *testing.T) {
+			m := datamodel.NewOrderedMap[string, int]()
+			for i := 0; i < mapSize; i++ {
+				m.Set(fmt.Sprintf("key%d", i), i+1000)
+			}
+
+			var translateCounter int64
+			translateFunc := func(pair datamodel.Pair[string, int]) (string, error) {
+				atomic.AddInt64(&translateCounter, 1)
+				return "", io.EOF
+			}
+			resultFunc := func(value string) error {
+				t.Fatal("Expected no call to resultFunc()")
+				return nil
+			}
+			err := datamodel.TranslateMapParallel[string, int, string](m, translateFunc, resultFunc)
+			require.NoError(t, err)
+			assert.Less(t, translateCounter, int64(mapSize))
+		})
+
+		t.Run("EOF in result", func(t *testing.T) {
+			m := datamodel.NewOrderedMap[string, int]()
+			for i := 0; i < mapSize; i++ {
+				m.Set(fmt.Sprintf("key%d", i), i+1000)
+			}
+
+			var resultCounter int
+			resultFunc := func(value string) error {
+				resultCounter++
+				return io.EOF
+			}
+			err := datamodel.TranslateMapParallel[string, int, string](m, translateFunc, resultFunc)
+			require.NoError(t, err)
+			assert.Less(t, resultCounter, mapSize)
 		})
 	})
 }
