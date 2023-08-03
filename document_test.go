@@ -4,14 +4,15 @@ package libopenapi
 
 import (
 	"fmt"
-	"github.com/pb33f/libopenapi/datamodel"
-	"github.com/pb33f/libopenapi/datamodel/high/base"
-	"github.com/pb33f/libopenapi/what-changed/model"
-	"github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/pb33f/libopenapi/datamodel"
+	"github.com/pb33f/libopenapi/datamodel/high/base"
+	"github.com/pb33f/libopenapi/what-changed/model"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLoadDocument_Simple_V2(t *testing.T) {
@@ -245,12 +246,12 @@ func TestDocument_RenderAndReload(t *testing.T) {
 
 	// mutate the model
 	h := m.Model
-	h.Paths.PathItems["/pet/findByStatus"].Get.OperationId = "findACakeInABakery"
-	h.Paths.PathItems["/pet/findByStatus"].Get.Responses.Codes["400"].Description = "a nice bucket of mice"
-	h.Paths.PathItems["/pet/findByTags"].Get.Tags =
-		append(h.Paths.PathItems["/pet/findByTags"].Get.Tags, "gurgle", "giggle")
+	h.Paths.PathItems.GetOrZero("/pet/findByStatus").Get.OperationId = "findACakeInABakery"
+	h.Paths.PathItems.GetOrZero("/pet/findByStatus").Get.Responses.Codes["400"].Description = "a nice bucket of mice"
+	h.Paths.PathItems.GetOrZero("/pet/findByTags").Get.Tags =
+		append(h.Paths.PathItems.GetOrZero("/pet/findByTags").Get.Tags, "gurgle", "giggle")
 
-	h.Paths.PathItems["/pet/{petId}"].Delete.Security = append(h.Paths.PathItems["/pet/{petId}"].Delete.Security,
+	h.Paths.PathItems.GetOrZero("/pet/{petId}").Delete.Security = append(h.Paths.PathItems.GetOrZero("/pet/{petId}").Delete.Security,
 		&base.SecurityRequirement{Requirements: map[string][]string{
 			"pizza-and-cake": {"read:abook", "write:asong"},
 		}})
@@ -263,13 +264,13 @@ func TestDocument_RenderAndReload(t *testing.T) {
 	assert.NotNil(t, bytes)
 
 	h = newDocModel.Model
-	assert.Equal(t, "findACakeInABakery", h.Paths.PathItems["/pet/findByStatus"].Get.OperationId)
+	assert.Equal(t, "findACakeInABakery", h.Paths.PathItems.GetOrZero("/pet/findByStatus").Get.OperationId)
 	assert.Equal(t, "a nice bucket of mice",
-		h.Paths.PathItems["/pet/findByStatus"].Get.Responses.Codes["400"].Description)
-	assert.Len(t, h.Paths.PathItems["/pet/findByTags"].Get.Tags, 3)
+		h.Paths.PathItems.GetOrZero("/pet/findByStatus").Get.Responses.Codes["400"].Description)
+	assert.Len(t, h.Paths.PathItems.GetOrZero("/pet/findByTags").Get.Tags, 3)
 
-	assert.Len(t, h.Paths.PathItems["/pet/findByTags"].Get.Tags, 3)
-	yu := h.Paths.PathItems["/pet/{petId}"].Delete.Security
+	assert.Len(t, h.Paths.PathItems.GetOrZero("/pet/findByTags").Get.Tags, 3)
+	yu := h.Paths.PathItems.GetOrZero("/pet/{petId}").Delete.Security
 	assert.Equal(t, "read:abook", yu[len(yu)-1].Requirements["pizza-and-cake"][0])
 	assert.Equal(t, "I am a teapot, filled with love.",
 		h.Components.Schemas["Order"].Schema().Properties["status"].Schema().Example)
@@ -378,7 +379,7 @@ paths:
 	}
 
 	// extract operation.
-	operation := result.Model.Paths.PathItems["/something"].Get
+	operation := result.Model.Paths.PathItems.GetOrZero("/something").Get
 
 	// print it out.
 	fmt.Printf("param1: %s, is reference? %t, original reference %s",
@@ -546,7 +547,7 @@ paths:
 //		panic(errs)
 //	}
 //
-//	assert.Equal(t, "crs", result.Model.Paths.PathItems["/test"].Get.Parameters[0].Name)
+//	assert.Equal(t, "crs", result.Model.Paths.PathItems.GetOrZero("/test").Get.Parameters[0].Name)
 //}
 
 func TestDocument_ExampleMap(t *testing.T) {
